@@ -5,7 +5,7 @@ Android приложение с GUI, которое поднимает HTTP-се
 ## Возможности
 
 - Поднимает HTTP-сервер на заданном порту
-- Принимает POST-запросы на `/run` с параметром `command`
+- Принимает POST-запросы на `/exec` с параметром `command`
 - Выполняет ADB shell-совместимые команды через `Runtime.exec(...)`
 - Показывает статус сервера на экране
 - Работает в фоне как foreground service
@@ -19,7 +19,7 @@ Android приложение с GUI, которое поднимает HTTP-се
 
 ## API
 
-### POST /run
+### POST /exec
 Выполняет ADB команду.
 
 **Параметры:**
@@ -27,7 +27,7 @@ Android приложение с GUI, которое поднимает HTTP-се
 
 **Пример запроса:**
 ```bash
-curl -X POST http://localhost:8080/run -d "command=adb shell ls /sdcard"
+curl -X POST http://localhost:8080/exec -d "command=adb shell ls /sdcard"
 ```
 
 **Ответ:**

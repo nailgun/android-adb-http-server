@@ -78,7 +78,7 @@ class HttpServer(private val port: Int, private val onLogMessage: (String) -> Un
             }
             
             when {
-                method == "POST" && path == "/run" -> {
+                method == "POST" && path == "/exec" -> {
                     handleRunCommand(reader, writer, contentLength)
                 }
                 method == "GET" && path == "/status" -> {
