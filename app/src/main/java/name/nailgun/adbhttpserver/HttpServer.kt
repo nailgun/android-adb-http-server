@@ -1,12 +1,17 @@
 package name.nailgun.adbhttpserver
 
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.*
 import java.io.*
 import java.net.*
 import java.util.concurrent.Executors
 
-class HttpServer(private val port: Int, private val onLogMessage: (String) -> Unit) {
+class HttpServer(private val port: Int, private val context: Context, private val onLogMessage: (String) -> Unit) {
     
     private var serverSocket: ServerSocket? = null
     private var isRunning = false
@@ -81,6 +86,9 @@ class HttpServer(private val port: Int, private val onLogMessage: (String) -> Un
                 method == "POST" && path == "/exec" -> {
                     handleRunCommand(reader, writer, contentLength)
                 }
+                method == "POST" && path == "/start" -> {
+                    handleStartActivity(reader, writer, contentLength)
+                }
                 method == "GET" && path == "/status" -> {
                     handleStatusRequest(writer)
                 }
@@ -132,6 +140,41 @@ class HttpServer(private val port: Int, private val onLogMessage: (String) -> Un
         }
     }
     
+    private fun handleStartActivity(reader: BufferedReader, writer: PrintWriter, contentLength: Int) {
+        try {
+            val body = CharArray(contentLength)
+            reader.read(body, 0, contentLength)
+            val requestBody = String(body)
+            
+            // Parse start parameters from request body
+            val startParams = parseStartParamsFromBody(requestBody)
+            if (startParams.isEmpty()) {
+                sendErrorResponse(writer, "Missing start parameters")
+                return
+            }
+            
+            onLogMessage("Starting activity with params: $startParams")
+            
+            // Check if we should force foreground execution
+            val forceForeground = startParams["force_foreground"]?.toBoolean() ?: false
+            
+            // Start activity using Android API
+            val result = startActivityWithParams(startParams, forceForeground)
+            
+            // Send response
+            writer.println("HTTP/1.1 200 OK")
+            writer.println("Content-Type: application/json")
+            writer.println("Content-Length: ${result.length}")
+            writer.println("Connection: close")
+            writer.println()
+            writer.println(result)
+            
+        } catch (e: Exception) {
+            onLogMessage("Error handling start activity: ${e.message}")
+            sendErrorResponse(writer, "Internal Server Error")
+        }
+    }
+    
     private fun handleStatusRequest(writer: PrintWriter) {
         val status = """{"status": "running", "port": $port}"""
         writer.println("HTTP/1.1 200 OK")
@@ -155,6 +198,25 @@ class HttpServer(private val port: Int, private val onLogMessage: (String) -> Un
         } catch (e: Exception) {
             onLogMessage("Error parsing command: ${e.message}")
             ""
+        }
+    }
+    
+    private fun parseStartParamsFromBody(body: String): Map<String, String> {
+        return try {
+            val params = mutableMapOf<String, String>()
+            val lines = body.split("&")
+            for (line in lines) {
+                val parts = line.split("=", limit = 2)
+                if (parts.size == 2) {
+                    val key = URLDecoder.decode(parts[0], "UTF-8")
+                    val value = URLDecoder.decode(parts[1], "UTF-8")
+                    params[key] = value
+                }
+            }
+            params
+        } catch (e: Exception) {
+            onLogMessage("Error parsing start params: ${e.message}")
+            emptyMap()
         }
     }
     
@@ -194,6 +256,146 @@ class HttpServer(private val port: Int, private val onLogMessage: (String) -> Un
         } catch (e: Exception) {
             onLogMessage("Error executing command: ${e.message}")
             """{"exitCode": -1, "output": "", "error": "${escapeJson(e.message ?: "Unknown error")}"}"""
+        }
+    }
+    
+    private fun startActivityWithParams(params: Map<String, String>, forceForeground: Boolean = false): String {
+        return try {
+            val intent = Intent()
+            
+            // Parse action (-a)
+            params["action"]?.let { action ->
+                intent.action = action
+            }
+            
+            // Parse data (-d)
+            params["data"]?.let { data ->
+                intent.data = Uri.parse(data)
+            }
+            
+            // Parse categories (-c)
+            params["category"]?.let { category ->
+                intent.addCategory(category)
+            }
+            
+            // Parse component (-n)
+            params["component"]?.let { component ->
+                val parts = component.split("/")
+                if (parts.size == 2) {
+                    intent.setClassName(parts[0], parts[1])
+                }
+            }
+            
+            // Parse flags (-f)
+            params["flags"]?.let { flags ->
+                try {
+                    val flagValue = flags.toInt()
+                    intent.flags = flagValue
+                } catch (e: NumberFormatException) {
+                    onLogMessage("Invalid flags value: $flags")
+                }
+            }
+            
+            // Parse extras (-e)
+            params["extras"]?.let { extras ->
+                try {
+                    // Simple parsing for extras in format "key:value,key2:value2"
+                    val extraPairs = extras.split(",")
+                    for (pair in extraPairs) {
+                        val keyValue = pair.split(":", limit = 2)
+                        if (keyValue.size == 2) {
+                            intent.putExtra(keyValue[0], keyValue[1])
+                        }
+                    }
+                } catch (e: Exception) {
+                    onLogMessage("Error parsing extras: ${e.message}")
+                }
+            }
+            
+            // Start activity with flags for background execution
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            intent.addFlags(Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT)
+            intent.addFlags(Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            
+            // If forceForeground is true, bring app to foreground first
+            if (forceForeground) {
+                tryBringAppToForeground()
+                Thread.sleep(500) // Give some time for the app to come to foreground
+            }
+
+            // Try to start activity, handle SecurityException
+            try {
+                context.startActivity(intent)
+            } catch (e: SecurityException) {
+                onLogMessage("SecurityException: ${e.message}")
+                // Try alternative method using PendingIntent
+                tryStartActivityWithPendingIntent(intent)
+            }
+            
+            val result = StringBuilder()
+            result.append("{\n")
+            result.append("  \"success\": true,\n")
+            result.append("  \"message\": \"Activity started successfully\",\n")
+            result.append("  \"intent\": {\n")
+            result.append("    \"action\": \"${intent.action ?: "null"}\",\n")
+            result.append("    \"data\": \"${intent.dataString ?: "null"}\",\n")
+            result.append("    \"categories\": \"${intent.categories?.joinToString(",") ?: "null"}\",\n")
+            result.append("    \"component\": \"${intent.component?.className ?: "null"}\"\n")
+            result.append("  }\n")
+            result.append("}")
+            
+            onLogMessage("Activity started successfully")
+            result.toString()
+            
+        } catch (e: Exception) {
+            onLogMessage("Error starting activity: ${e.message}")
+            """{"success": false, "message": "${escapeJson(e.message ?: "Unknown error")}"}"""
+        }
+    }
+    
+    private fun tryStartActivityWithPendingIntent(intent: Intent) {
+        try {
+            val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                0,
+                intent,
+                pendingIntentFlags
+            )
+            
+            // Try to send the pending intent
+            pendingIntent.send()
+            onLogMessage("Activity started using PendingIntent")
+            
+        } catch (e: Exception) {
+            onLogMessage("Failed to start activity with PendingIntent: ${e.message}")
+            // Last resort: try to bring app to foreground first
+            tryBringAppToForeground()
+        }
+    }
+    
+    private fun tryBringAppToForeground() {
+        try {
+            val packageManager = context.packageManager
+            val packageName = context.packageName
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+            
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                context.startActivity(launchIntent)
+                onLogMessage("Brought app to foreground")
+            }
+        } catch (e: Exception) {
+            onLogMessage("Failed to bring app to foreground: ${e.message}")
         }
     }
     

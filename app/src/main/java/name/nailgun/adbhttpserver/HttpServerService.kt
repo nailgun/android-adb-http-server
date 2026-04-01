@@ -59,7 +59,7 @@ class HttpServerService : Service() {
         
         startForeground(NOTIFICATION_ID, createNotification("Server starting..."))
         
-        httpServer = HttpServer(port) { message ->
+        httpServer = HttpServer(port, this) { message ->
             // Update notification with log message
             updateNotification(message)
             
